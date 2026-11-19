@@ -42,18 +42,18 @@
 {\color{accent}\rule{\linewidth}{0.65pt}}\par
 \vspace{2mm}
 
-这款民用六旋翼面向航拍与教学展示。初版通过多轮对话确定机架尺寸与配色，第二版参照 ImageGen 生成的机壳和相机多视角图重建外观。两版的几何与表面纹理均由 Three.js 模块在运行时生成。
+这款民用六旋翼用于航拍与教学展示。机壳和云台相机的造型参照了 ImageGen 生成的多视角部件图。一个可复用的 Three.js 模块在运行时生成整机几何、碳纤维纹理和镜片材质。
 \par\vspace{3mm}
 
 \noindent\begin{minipage}[t]{0.688\linewidth}
-  \vspace{0pt}\includegraphics[width=\linewidth]{hexacopter-v2.png}
-  \photocaption{参考图版整机}{橙色嵌条勾出机头轮廓，航拍相机悬于双滑橇之间。}
+  \vspace{0pt}\includegraphics[width=\linewidth]{hexacopter.png}
+  \photocaption{整机}{橙色嵌条勾出机头轮廓，航拍相机悬于双滑橇之间。}
 \end{minipage}\hfill
 \begin{minipage}[t]{0.287\linewidth}
-  \vspace{0pt}\includegraphics[width=\linewidth]{housing-v2.png}
+  \vspace{0pt}\includegraphics[width=\linewidth]{housing.png}
   \photocaption{机壳}{下沉百叶与沉头螺钉。}
   \vspace{2mm}
-  \includegraphics[width=\linewidth]{gimbal-v2.png}
+  \includegraphics[width=\linewidth]{gimbal.png}
   \photocaption{云台}{弯折铝支架与镀膜镜片。}
 \end{minipage}
 
@@ -63,12 +63,12 @@
   \theta_i=\frac{\pi}{6}+i\frac{\pi}{3},\qquad
   (x_i,z_i)=(0.45\,\mathrm{m})(\sin\theta_i,\,\cos\theta_i),\qquad i=0,\ldots,5 .
 \]
-相邻机臂的夹角为 \(60^\circ\)，对置电机的轴距为 \(0.90\,\mathrm{m}\)，中央机壳最宽处为 \(0.27\,\mathrm{m}\)。两版共用机臂、旋翼和滑橇的几何。切换预览版本时，相机位置和桨叶角度保持一致，便于比较。
+相邻机臂的夹角为 \(60^\circ\)，对置电机的轴距为 \(0.90\,\mathrm{m}\)，中央机壳最宽处为 \(0.27\,\mathrm{m}\)。从俯视图可见六根机臂的等角布局，从侧视图可见相机的悬挂位置与离地间隙。
 
 \topic{旋翼动画与场景调用}
 每副双叶桨都绕自身电机的局部 \(Y\) 轴旋转。\texttt{rotor-spin} 片段的演示速度为每秒一圈，相邻旋翼的转向相反。创建整机后，用 Three.js 的动画混合器播放该片段。
 \begin{lstlisting}
-const drone = createHexacopter({ version: 2 });
+const drone = createHexacopter();
 scene.add(drone);
 const mixer = new THREE.AnimationMixer(drone);
 const clip = THREE.AnimationClip.findByName(drone.animations, 'rotor-spin');
