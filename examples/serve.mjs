@@ -8,6 +8,7 @@ const three = join(root, 'node_modules', 'three');
 const files = new Map([
   ['/', join(root, 'examples', 'preview.html')],
   ['/hexacopter.mjs', join(root, 'hexacopter.mjs')],
+  ['/reference-components.png', join(root, 'docs', 'reference', 'components-multiview.png')],
   ['/three.module.js', join(three, 'build', 'three.module.js')],
   ['/three.core.js', join(three, 'build', 'three.core.js')],
   ['/orbit.js', join(three, 'examples', 'jsm', 'controls', 'OrbitControls.js')],
@@ -22,8 +23,10 @@ const server = createServer(async (request, response) => {
   }
   try {
     const content = await readFile(files.get(path));
-    const type = path === '/' ? 'text/html' : 'text/javascript';
-    response.writeHead(200, { 'Content-Type': type + '; charset=utf-8', 'Cache-Control': 'no-store' });
+    let type = 'text/javascript; charset=utf-8';
+    if (path === '/') type = 'text/html; charset=utf-8';
+    if (path.endsWith('.png')) type = 'image/png';
+    response.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
     response.end(content);
   } catch {
     response.writeHead(500).end('Preview asset unavailable');

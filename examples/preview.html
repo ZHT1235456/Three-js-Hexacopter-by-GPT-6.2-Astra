@@ -5,13 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#e8ebea">
   <link rel="icon" href="data:,">
-  <title>六旋翼模型预览</title>
+  <title>民用航拍六旋翼 · 外观对比</title>
   <style>
     * { box-sizing: border-box; }
     html, body, main { width: 100%; height: 100%; margin: 0; overflow: hidden; }
     body { background: #e8ebea; color: #263038; font: 14px/1.4 Inter, "Microsoft YaHei", sans-serif; }
     canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; cursor: grab; }
     canvas:active { cursor: grabbing; }
+    header { position: fixed; top: 16px; left: 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; max-width: calc(100% - 36px); }
+    h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    .versions { display: inline-flex; padding: 3px; gap: 2px; background: #fbfcfbf5; border: 1px solid #c4cbc9; border-radius: 10px; }
+    .versions button { padding: 6px 12px; }
+    .reference { color: #43504d; text-underline-offset: 3px; }
     nav { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; gap: 4px; align-items: center; background: #fbfcfbf5; padding: 5px; border: 1px solid #c4cbc9; border-radius: 12px; box-shadow: 0 3px 14px #15272212; }
     button { border: 0; background: transparent; padding: 8px 15px; border-radius: 7px; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
     button:hover { background: #e5e9e7; }
@@ -19,15 +24,32 @@
     button:focus-visible { outline: 2px solid #a74716; outline-offset: 2px; }
     .hint { padding: 0 12px; border-left: 1px solid #cbd1ce; font-size: 12px; white-space: nowrap; color: #52605e; }
     #status { position: fixed; inset: 42% 16px auto; text-align: center; pointer-events: none; }
-    @media (max-width: 520px), (pointer: coarse) { .hint { display: none; } }
+    @media (max-width: 650px), (pointer: coarse) { .hint { display: none; } }
+    @media (max-width: 520px) {
+      header { left: 12px; top: 12px; gap: 8px; max-width: calc(100% - 24px); }
+      h1 { width: 100%; font-size: 14px; }
+      nav { width: max-content; max-width: calc(100% - 20px); flex-wrap: wrap; justify-content: center; gap: 0; }
+      nav button { padding: 8px 9px; }
+    }
   </style>
   <script type="importmap">{"imports":{"three":"/three.module.js"}}</script>
 </head>
 <body>
-  <main aria-label="六旋翼三维模型"></main>
+  <main aria-label="民用航拍六旋翼三维模型"></main>
+  <header>
+    <h1>民用航拍六旋翼</h1>
+    <div class="versions" role="group" aria-label="模型版本">
+      <button type="button" data-version="1" aria-pressed="false">初版</button>
+      <button type="button" data-version="2" aria-pressed="true">参考图版</button>
+    </div>
+    <a class="reference" href="/reference-components.png" target="_blank" rel="noopener">部件参考图</a>
+  </header>
   <div id="status" role="status">正在加载三维模型…</div>
   <nav aria-label="模型预览控制">
     <button data-view="whole" aria-pressed="true">整机</button>
+    <button data-view="top" aria-pressed="false">俯视</button>
+    <button data-view="side" aria-pressed="false">侧视</button>
+    <button data-view="housing" aria-pressed="false">机壳</button>
     <button data-view="motor" aria-pressed="false">电机</button>
     <button data-view="gimbal" aria-pressed="false">云台</button>
     <button type="button" id="rotor-playback">暂停螺旋桨</button>
@@ -75,8 +97,9 @@
       ground.receiveShadow = true;
       scene.add(ground);
 
-      const model = createHexacopter();
-      scene.add(model);
+      const models = [1, 2].map(version => createHexacopter({ version }));
+      models[0].visible = false;
+      scene.add(...models);
       scene.updateMatrixWorld(true);
       const camera = new THREE.PerspectiveCamera(32, 1, 0.002, 40);
       const orbit = new OrbitControls(camera, renderer.domElement);
@@ -84,31 +107,41 @@
       orbit.maxDistance = 20;
       orbit.zoomSpeed = 0.85;
       const render = () => renderer.render(scene, camera);
-      const mixer = new THREE.AnimationMixer(model);
-      const spin = mixer.clipAction(THREE.AnimationClip.findByName(model.animations, 'rotor-spin')).play();
+      const mixers = models.map(model => {
+        const mixer = new THREE.AnimationMixer(model);
+        mixer.clipAction(THREE.AnimationClip.findByName(model.animations, 'rotor-spin')).play();
+        return mixer;
+      });
+      let paused = false;
       const playback = document.getElementById('rotor-playback');
       let previousFrame = null;
       function animate(now) {
-        if (previousFrame !== null) mixer.update((now - previousFrame) / 1000);
+        if (previousFrame !== null) {
+          const seconds = (now - previousFrame) / 1000;
+          for (const mixer of mixers) mixer.update(seconds);
+        }
         previousFrame = now;
         render();
       }
       function scheduleAnimation() {
         previousFrame = null;
-        renderer.setAnimationLoop(spin.paused || document.hidden ? null : animate);
+        renderer.setAnimationLoop(paused || document.hidden ? null : animate);
       }
       playback.addEventListener('click', () => {
-        spin.paused = !spin.paused;
-        playback.textContent = spin.paused ? '转动螺旋桨' : '暂停螺旋桨';
+        paused = !paused;
+        playback.textContent = paused ? '转动螺旋桨' : '暂停螺旋桨';
         scheduleAnimation();
       });
       document.addEventListener('visibilitychange', scheduleAnimation);
       const center = new THREE.Vector3(0, 0.18, 0);
-      const motor = model.getObjectByName('motor-2').getWorldPosition(new THREE.Vector3());
+      const motor = models[0].getObjectByName('motor-2').getWorldPosition(new THREE.Vector3());
       motor.y += 0.015;
-      const gimbal = model.getObjectByName('gimbal-pitch').getWorldPosition(new THREE.Vector3());
+      const gimbal = models[0].getObjectByName('gimbal-pitch').getWorldPosition(new THREE.Vector3());
       const views = {
         whole: { target: center, direction: [0.78, 1.08, 1.68], width: 1.45, height: 0.81 },
+        top: { target: new THREE.Vector3(0, 0.25, 0), direction: [0, 1, 0.0001], width: 1.47, height: 1.42 },
+        side: { target: new THREE.Vector3(0, 0.16, 0), direction: [1, 0.032, 0], width: 1.45, height: 0.64 },
+        housing: { target: new THREE.Vector3(0, 0.269, 0.012), direction: [0.54, 1.02, 0.82], width: 0.50, height: 0.34 },
         motor: { target: motor, direction: [0.15, 0.23, 0.49], width: 0.20, height: 0.13 },
         gimbal: { target: gimbal, direction: [0.17, 0.11, 1], width: 0.20, height: 0.175 },
       };
@@ -136,7 +169,16 @@
         const button = event.target.closest('button[data-view]');
         if (button) setView(button.dataset.view);
       });
-      orbit.addEventListener('change', () => { if (spin.paused) render(); });
+      document.querySelector('.versions').addEventListener('click', event => {
+        const target = event.target.closest('button[data-version]');
+        if (!target) return;
+        models.forEach((model, i) => { model.visible = i + 1 === Number(target.dataset.version); });
+        document.querySelectorAll('[data-version]').forEach(button => {
+          button.setAttribute('aria-pressed', String(button === target));
+        });
+        render();
+      });
+      orbit.addEventListener('change', () => { if (paused) render(); });
       window.addEventListener('resize', layout);
       layout();
       scheduleAnimation();

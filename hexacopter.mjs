@@ -153,8 +153,9 @@ class Parts {
   constructor() {
     this.geometries = new Map();
     this.batches = [];
-    this.weave = carbonWeave();
-    this.materials = makeMaterials(this.weave);
+    const weave = carbonWeave();
+    this.textures = [weave];
+    this.materials = makeMaterials(weave);
   }
 
   geometry(key, build) {
@@ -223,7 +224,7 @@ class Parts {
     this.batches.forEach(mesh => mesh.dispose());
     this.geometries.forEach(geometry => geometry.dispose());
     Object.values(this.materials).forEach(material => material.dispose());
-    this.weave.dispose();
+    this.textures.forEach(texture => texture.dispose());
   }
 }
 
@@ -570,7 +571,7 @@ function buildCamera(parts, pitch) {
   dome.castShadow = false;
 }
 
-function buildGimbal(parts, root) {
+function buildGimbal(parts, root, referenceEdition) {
   const mount = group(root, 'gimbal', 0, 0.215, 0.055);
   parts.plate(mount, 'upper-isolator-plate', 'black', 0.093, 0.008, 0.071, 0.011, 0, 0.001, 0);
   parts.plate(mount, 'lower-isolator-plate', 'hatch', 0.089, 0.005, 0.068, 0.009, 0, -0.022, 0);
@@ -588,6 +589,10 @@ function buildGimbal(parts, root) {
     [0.018, -0.024], [0, -0.024],
   ]);
   const yaw = group(mount, 'gimbal-yaw', 0, -0.037, 0);
+  if (referenceEdition) {
+    buildReferenceGimbalHead(parts, yaw);
+    return;
+  }
   parts.plate(yaw, 'yoke-bridge', 'rail', 0.088, 0.010, 0.022, 0.006, 0, -0.003, -0.005);
   for (const side of [-1, 1]) {
     const x = side * 0.039;
@@ -604,6 +609,474 @@ function buildGimbal(parts, root) {
   buildCamera(parts, pitch);
 }
 
+// Second edition. The grain and machining marks are generated at physical
+// scale. R stores surface height and G stores roughness for the two PBR maps.
+function finishTexture(name, { brushed = false, albedo = false } = {}) {
+  const size = 128;
+  const data = new Uint8Array(size * size * 4);
+  let seed = 0x61ac0;
+  function noise() {
+    seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  }
+  for (let y = 0; y < size; y++) {
+    const line = noise() - 0.5;
+    for (let x = 0; x < size; x++) {
+      const grain = noise() - 0.5;
+      const offset = (y * size + x) * 4;
+      if (albedo) {
+        const grey = 225 + 48 * grain;
+        data.set([grey, grey, grey, 255], offset);
+      } else {
+        const relief = brushed ? 0.82 * line + 0.18 * grain : grain;
+        data.set([128 + 118 * relief, 214 + 62 * relief, 255, 255], offset);
+      }
+    }
+  }
+  const map = new THREE.DataTexture(data, size, size);
+  map.name = name;
+  map.wrapS = map.wrapT = THREE.RepeatWrapping;
+  map.generateMipmaps = true;
+  map.minFilter = THREE.LinearMipmapLinearFilter;
+  map.magFilter = THREE.LinearFilter;
+  map.anisotropy = 4;
+  map.needsUpdate = true;
+  return map;
+}
+
+function addReferenceFinishes(parts) {
+  const polymer = finishTexture('Mould grain');
+  const speckle = finishTexture('Polymer speckle', { albedo: true });
+  const metal = finishTexture('Machining lines', { brushed: true });
+  parts.textures.push(polymer, speckle, metal);
+  const finish = (name, color, metalness, roughness, options = {}) =>
+    new THREE.MeshStandardMaterial({ name, color, metalness, roughness, ...options });
+  Object.assign(parts.materials, {
+    mould: finish('Grained graphite polymer', 0x505154, 0.11, 0.51,
+      { map: speckle, roughnessMap: polymer, bumpMap: polymer, bumpScale: 0.00023 }),
+    rim: finish('Dark moulded skirt', 0x353536, 0.07, 0.54),
+    inlay: finish('Burnt orange inlay', 0xda681f, 0.40, 0.36),
+    vanes: finish('Black vent vanes', 0x333435, 0.22, 0.40),
+    brushed: finish('Brushed natural aluminium', 0xb9b7b1, 0.81, 0.38,
+      { roughnessMap: metal, bumpMap: metal, bumpScale: 0.000035 }),
+    toolBlack: finish('Black oxide hardware', 0x514e49, 0.65, 0.36, { vertexColors: true }),
+    cameraCast: finish('Die-cast camera housing', 0x343538, 0.38, 0.43,
+      { roughnessMap: polymer, bumpMap: polymer, bumpScale: 0.000095 }),
+    lensMetal: finish('Fine black lens barrel', 0x29292c, 0.57, 0.36),
+    flex: finish('Amber flexible circuit', 0x99581e, 0.24, 0.42),
+    traces: finish('Etched copper traces', 0xcf8e42, 0.60, 0.35),
+    coatedLens: new THREE.MeshPhysicalMaterial({
+      name: 'Multicoated objective', color: 0xc2cbd7, vertexColors: true, metalness: 0.42,
+      roughness: 0.10, clearcoat: 1, clearcoatRoughness: 0.055,
+      iridescence: 0.70, iridescenceIOR: 1.39, iridescenceThicknessRange: [210, 390],
+    }),
+  });
+  const frontCoating = parts.materials.coatedLens.clone();
+  frontCoating.name = 'Translucent front coating';
+  frontCoating.transparent = true;
+  frontCoating.opacity = 0.49;
+  frontCoating.depthWrite = false;
+  parts.materials.frontCoating = frontCoating;
+}
+
+// Clockwise contours are drawn in X, Z. Positive Z is the nose.
+function housingOutline() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0.187);
+  shape.bezierCurveTo(0.025, 0.187, 0.033, 0.174, 0.051, 0.155);
+  shape.bezierCurveTo(0.093, 0.110, 0.135, 0.052, 0.135, -0.003);
+  shape.bezierCurveTo(0.135, -0.064, 0.124, -0.126, 0.095, -0.153);
+  shape.bezierCurveTo(0.075, -0.173, 0.040, -0.178, 0, -0.178);
+  shape.bezierCurveTo(-0.040, -0.178, -0.075, -0.173, -0.095, -0.153);
+  shape.bezierCurveTo(-0.124, -0.126, -0.135, -0.064, -0.135, -0.003);
+  shape.bezierCurveTo(-0.135, 0.052, -0.093, 0.110, -0.051, 0.155);
+  shape.bezierCurveTo(-0.033, 0.174, -0.025, 0.187, 0, 0.187);
+  return shape.getPoints(18).slice(0, -1);
+}
+
+function roundPlan(width, length, radius, samples = 80) {
+  const x = width / 2, z = length / 2;
+  const shape = new THREE.Shape();
+  shape.moveTo(-x + radius, z);
+  shape.lineTo(x - radius, z);
+  shape.quadraticCurveTo(x, z, x, z - radius);
+  shape.lineTo(x, -z + radius);
+  shape.quadraticCurveTo(x, -z, x - radius, -z);
+  shape.lineTo(-x + radius, -z);
+  shape.quadraticCurveTo(-x, -z, -x, -z + radius);
+  shape.lineTo(-x, z - radius);
+  shape.quadraticCurveTo(-x, z, -x + radius, z);
+  return shape.getSpacedPoints(samples).slice(0, -1);
+}
+
+function deckHeight(x, z) {
+  const crown = Math.hypot(x, 0.018) - 0.018;
+  const shoulder = Math.max(0, Math.abs(x) - 0.068);
+  return 0.051 - 0.087 * crown - 2.8 * shoulder ** 2 - 0.68 * (z + 0.025) ** 2 - 0.040 * z;
+}
+
+function raisedCoverHeight(x, z) {
+  const crown = Math.max(0, 1 - (x / 0.078) ** 2);
+  return deckHeight(x, z) + 0.010 + 0.010 * crown - 0.20 * (z + 0.035) ** 2;
+}
+
+// Triangulate the actual openings. Subdividing the cap before lifting it to its
+// curved height field preserves the moulded crown around the holes.
+function panelFace(outline, holes, height, subdivisions = 0, upward = true) {
+  const vertices = [...outline, ...holes.flat()];
+  let faces = THREE.ShapeUtils.triangulateShape(outline, holes);
+  for (let level = 0; level < subdivisions; level++) {
+    const midpoints = new Map();
+    function midpoint(a, b) {
+      const key = Math.min(a, b) + '/' + Math.max(a, b);
+      if (!midpoints.has(key)) {
+        midpoints.set(key, vertices.length);
+        vertices.push(vertices[a].clone().lerp(vertices[b], 0.5));
+      }
+      return midpoints.get(key);
+    }
+    faces = faces.flatMap(([a, b, c]) => {
+      const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+      return [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]];
+    });
+  }
+  const positions = [], normals = [], uv = [];
+  const delta = 0.00002;
+  for (const {x, y: z} of vertices) {
+    positions.push(x, height(x, z), z);
+    const dx = (height(x + delta, z) - height(x - delta, z)) / (2 * delta);
+    const dz = (height(x, z + delta) - height(x, z - delta)) / (2 * delta);
+    const normal = new THREE.Vector3(-dx, 1, -dz).normalize();
+    if (!upward) normal.negate();
+    normals.push(normal.x, normal.y, normal.z);
+    uv.push(x * 32, z * 32);
+  }
+  const indices = [];
+  for (const [a, b, c] of faces) {
+    const p = vertices[a], q = vertices[b], r = vertices[c];
+    const ccw = (q.x - p.x) * (r.y - p.y) > (q.y - p.y) * (r.x - p.x);
+    if (ccw === upward) indices.push(a, c, b);
+    else indices.push(a, b, c);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
+// Each row is a complete horizontal contour. Group indices by finish so the
+// continuous nose inlay and the stepped seal share their edges with the shell.
+function contourWall(rings, finishAt) {
+  const columns = rings[0].length;
+  const rows = rings.length - 1;
+  const geometry = surface(columns, rows, (u, v) =>
+    rings[Math.round(v * rows)][Math.round(u * columns) % columns]);
+  const normals = geometry.getAttribute('normal');
+  const startNormal = new THREE.Vector3(), endNormal = new THREE.Vector3();
+  for (let row = 0; row <= rows; row++) {
+    const first = row * (columns + 1), last = first + columns;
+    startNormal.fromBufferAttribute(normals, first);
+    endNormal.fromBufferAttribute(normals, last);
+    const smooth = startNormal.add(endNormal).normalize();
+    normals.setXYZ(first, smooth.x, smooth.y, smooth.z);
+    normals.setXYZ(last, smooth.x, smooth.y, smooth.z);
+  }
+  const distances = [0];
+  for (let i = 0; i < columns; i++) {
+    const a = rings[0][i], b = rings[0][(i + 1) % columns];
+    distances.push(distances[i] + Math.hypot(b[0] - a[0], b[2] - a[2]));
+  }
+  const uv = [];
+  for (const ring of rings) {
+    for (let col = 0; col <= columns; col++) uv.push(distances[col] * 32, ring[col % columns][1] * 32);
+  }
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  if (finishAt) {
+    const indices = geometry.index.array;
+    const groups = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const slot = finishAt(row, col);
+        const groupIndices = groups[slot] ??= [];
+        const start = (row * columns + col) * 6;
+        for (let i = 0; i < 6; i++) groupIndices.push(indices[start + i]);
+      }
+    }
+    let offset = 0;
+    groups.forEach((list, index) => {
+      geometry.addGroup(offset, list.length, index);
+      offset += list.length;
+    });
+    geometry.setIndex(groups.flat());
+  }
+  return geometry;
+}
+
+function circlePlan(x, z, radius) {
+  return Array.from({ length: 36 }, (_, i) => {
+    const a = i * TAU / 36;
+    return new THREE.Vector2(x + radius * Math.sin(a), z + radius * Math.cos(a));
+  });
+}
+
+function intakePlan(side) {
+  const ring = roundPlan(0.029, 0.14, 0.009).map(p => {
+    const z = p.y - 0.040;
+    const center = 0.092 - 1.20 * (z + 0.012) ** 2;
+    return new THREE.Vector2(side * (center + p.x), z);
+  });
+  return side > 0 ? ring : ring.reverse();
+}
+
+function buildReferenceBody(parts, root) {
+  const body = group(root, 'fuselage', 0, BOOM_HEIGHT, 0);
+  const plan = housingOutline(), vents = [-1, 1].map(intakePlan);
+  const deck = plan.map(p => p.clone().multiplyScalar(0.916));
+  const skirt = plan.map(p => p.clone().multiplyScalar(0.82));
+  // Bottom return, lower lip, squeezed gasket, side draft, inlay and top bevel.
+  const levels = [
+    [0.820, 0, -0.042], [0.870, 0, -0.040], [0.972, 0, -0.025], [0.990, 0, -0.020],
+    [0.999, 0, -0.017], [1, 0, -0.0145], [0.995, 0, -0.013], [0.994, 0, -0.0107],
+    [0.999, 0, -0.0098], [0.993, 0, -0.006], [0.970, 0.74, -0.001],
+    [0.958, 1, -0.0062], [0.947, 1, -0.0056], [0.946, 1, -0.0054],
+    [0.930, 1, -0.0030], [0.916, 1, 0],
+  ];
+  const walls = levels.map(([scale, fraction, offset], row) => plan.map(p => {
+    const height = deckHeight(p.x * 0.916, p.y * 0.916);
+    const taper = THREE.MathUtils.smootherstep(p.y, 0.021, 0.102);
+    const bandScale = row === 12 ? 0.006 * taper : row === 13 ? -0.011 * taper : 0;
+    const x = p.x * (scale + bandScale), z = p.y * (scale + bandScale);
+    const band = row === 11 || row === 12 ? 0.0002 + 0.0048 * taper : 0;
+    return [x, height * fraction + offset - band, z];
+  }));
+  const sidewall = parts.geometry('reference housing walls', () => contourWall(walls, (row, col) => {
+    if (row <= 3) return 1;
+    if (row <= 7) return 2;
+    if (row === 12 && plan[col].y > 0.026) return 3;
+    if ((row === 11 || row === 13) && plan[col].y > 0.026) return 1;
+    return 0;
+  }));
+  const wall = parts.mesh(body, 'housing-sidewall', sidewall, 'mould');
+  wall.material = [parts.materials.mould, parts.materials.rim, parts.materials.rubber, parts.materials.inlay];
+  parts.mesh(body, 'upper-shell', parts.geometry('perforated deck',
+    () => panelFace(deck, vents, deckHeight, 2)), 'mould');
+  parts.mesh(body, 'lower-shell', parts.geometry('belly closure',
+    () => panelFace(skirt, [], () => -0.042, 0, false)), 'rim');
+
+  for (const [index, side] of [-1, 1].entries()) {
+    const mouth = vents[index];
+    const center = new THREE.Vector2(side * 0.091, -0.04);
+    const throat = mouth.map(p => new THREE.Vector2(
+      THREE.MathUtils.lerp(center.x, p.x, 0.90), THREE.MathUtils.lerp(center.y, p.y, 0.976)));
+    const wallRings = [mouth, throat, throat].map((ring, i) =>
+      ring.map(p => [p.x, deckHeight(p.x, p.y) - [0, 0.0017, 0.010][i], p.y]));
+    parts.mesh(body, 'recessed-vent-rim', parts.geometry('vent throat/' + side,
+      () => contourWall(wallRings)), 'rim');
+    parts.mesh(body, 'vent-chamber', parts.geometry('vent floor/' + side,
+      () => panelFace(throat, [], (x, z) => deckHeight(x, z) - 0.010)), 'iris');
+    for (let i = 0; i < 8; i++) {
+      const z = -0.096 + i * 0.016;
+      const x = side * (0.092 - 1.20 * (z + 0.012) ** 2);
+      const vane = parts.plate(body, 'intake-vane', 'vanes', 0.0275, 0.0032, 0.008, 0.0013,
+        x, deckHeight(x, z) - 0.0042, z);
+      vane.rotation.set(-0.38, -side * 0.065, -side * 0.105);
+    }
+  }
+
+  const cover = roundPlan(0.150, 0.226, 0.024, 128).map(p => {
+    const z = p.y - 0.032;
+    return new THREE.Vector2(p.x * (1 - 0.14 * (p.y / 0.113) ** 2), z);
+  });
+  const holes = [-0.050, 0.050].flatMap(x => [-0.095, 0.058].map(z => circlePlan(x, z, 0.0049)));
+  const rings = [[1.025, 0, 0.0002], [1.025, 0, 0.0014], [1.008, 0, 0.0020],
+    [1.002, 0.60, 0], [0.983, 0.91, 0], [0.961, 1, 0]].map(([factor, lift, offset]) => cover.map(p => {
+      const x = p.x * factor, z = (p.y + 0.032) * factor - 0.032;
+      return [x, THREE.MathUtils.lerp(deckHeight(x, z), raisedCoverHeight(x, z), lift) + offset, z];
+    }));
+  const coverWall = parts.mesh(body, 'hatch-reveal', parts.geometry('hatch shoulder',
+    () => contourWall(rings, row => row < 2 ? 1 : 0)), 'mould');
+  coverWall.material = [parts.materials.mould, parts.materials.rubber];
+  const top = rings[rings.length - 1].map(([x, , z]) => new THREE.Vector2(x, z));
+  parts.mesh(body, 'service-cover', parts.geometry('recessed service cover',
+    () => panelFace(top, holes, raisedCoverHeight, 2)), 'mould');
+  const fasteners = [];
+  for (const [i, hole] of holes.entries()) {
+    const center = hole.reduce((sum, p) => sum.add(p), new THREE.Vector2()).multiplyScalar(1 / hole.length);
+    const bottom = hole.map(p => center.clone().lerp(p, 0.78));
+    const y = raisedCoverHeight(center.x, center.y) - 0.0021;
+    const pocket = [hole.map(p => [p.x, raisedCoverHeight(p.x, p.y), p.y]),
+      bottom.map(p => [p.x, y, p.y]), bottom.map(() => [center.x, y, center.y])];
+    parts.mesh(body, 'countersink', parts.geometry('screw well/' + i, () => contourWall(pocket)), 'rim');
+    fasteners.push([center.x, y, center.y]);
+  }
+  parts.screws(body, 'cover-fasteners', fasteners, 0.00345).material = parts.materials.toolBlack;
+}
+
+function finishUV(geometry) {
+  const positions = geometry.getAttribute('position'), normals = geometry.getAttribute('normal');
+  const uv = [];
+  for (let i = 0; i < positions.count; i++) {
+    const x = positions.getX(i), y = positions.getY(i), z = positions.getZ(i);
+    const nx = Math.abs(normals.getX(i)), ny = Math.abs(normals.getY(i)), nz = Math.abs(normals.getZ(i));
+    if (ny >= nx && ny >= nz) uv.push(x * 32, z * 32);
+    else if (nx >= nz) uv.push(z * 32, y * 32);
+    else uv.push(x * 32, y * 32);
+  }
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  return geometry;
+}
+
+function yokeGeometry() {
+  // The lower bend sweeps back behind the lens to give it clearance when looking down.
+  const s = new THREE.Shape();
+  s.moveTo(-0.0455, 0.008);
+  s.lineTo(-0.0455, -0.026);
+  s.quadraticCurveTo(-0.0455, -0.046, -0.026, -0.046);
+  s.lineTo(0.026, -0.046);
+  s.quadraticCurveTo(0.0455, -0.046, 0.0455, -0.026);
+  s.lineTo(0.0455, 0.008);
+  s.quadraticCurveTo(0.0455, 0.012, 0.0425, 0.012);
+  s.quadraticCurveTo(0.039, 0.012, 0.039, 0.008);
+  s.lineTo(0.039, -0.025);
+  s.quadraticCurveTo(0.039, -0.0395, 0.025, -0.0395);
+  s.lineTo(-0.025, -0.0395);
+  s.quadraticCurveTo(-0.039, -0.0395, -0.039, -0.025);
+  s.lineTo(-0.039, 0.008);
+  s.quadraticCurveTo(-0.039, 0.012, -0.0425, 0.012);
+  s.quadraticCurveTo(-0.0455, 0.012, -0.0455, 0.008);
+  const geometry = new THREE.ExtrudeGeometry(s, {
+    depth: 0.019, bevelSize: 0.00055, bevelThickness: 0.00065, bevelSegments: 3, curveSegments: 18,
+  });
+  const p = geometry.getAttribute('position');
+  for (let i = 0; i < p.count; i++) {
+    p.setZ(i, p.getZ(i) - 0.0095 + Math.min(0, p.getY(i) + 0.009) * 1.20);
+  }
+  geometry.computeVertexNormals();
+  return finishUV(geometry);
+}
+
+function focusRing() {
+  const profile = [[0.0302, 0.012], [0.0313, 0.013], [0.0316, 0.0145],
+    [0.0316, 0.0305], [0.0313, 0.032], [0.0301, 0.033]];
+  return surface(288, profile.length - 1, (u, v) => {
+    const row = Math.round(v * (profile.length - 1));
+    const [r, y] = profile[row], angle = u * TAU;
+    const flute = row === 2 || row === 3 ? 0.00080 * (1 - Math.cos(72 * angle)) / 2 : 0;
+    return [(r - flute) * Math.sin(angle), y, (r - flute) * Math.cos(angle)];
+  });
+}
+
+function objectiveGeometry(outer, inner, rimHeight, sag, shift) {
+  const cols = 80, rows = 28;
+  const colors = [];
+  const blue = new THREE.Color(0x246b9e), violet = new THREE.Color(0x674883);
+  const dark = new THREE.Color(0x0c1522), tint = new THREE.Color();
+  const geometry = surface(cols, rows, (u, v) => {
+    const r = THREE.MathUtils.lerp(outer, inner, v), angle = u * TAU;
+    // The anti-reflection coating is tinted. The highlights themselves are
+    // produced by the environment on the curved glass and change with the camera.
+    tint.copy(blue).lerp(violet, 0.48 + 0.42 * Math.cos(2 * angle + 1.8 * v + shift));
+    const coating = 0.23 + 0.61 * Math.sin(v * Math.PI) ** 1.3;
+    tint.lerp(dark, 1 - coating);
+    colors.push(tint.r, tint.g, tint.b);
+    const y = rimHeight + sag * (1 - (r / outer) ** 2);
+    return [r * Math.sin(angle), y, r * Math.cos(angle)];
+  });
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  return geometry;
+}
+
+function cameraRibbon(parts, camera) {
+  const curve = new THREE.CatmullRomCurve3([
+    [0.009, 0.017, -0.032], [0.009, 0.026, -0.040], [0.013, 0.032, -0.047],
+    [0.024, 0.026, -0.046], [0.031, 0.009, -0.030], [0.036, 0, 0],
+  ].map(p => new THREE.Vector3(...p)));
+  const geometry = parts.geometry('flexible camera ribbon', () => {
+    const columns = 24, rows = 36;
+    const mesh = surface(columns, rows, (u, v) => {
+      const p = curve.getPoint(v);
+      return [p.x + (u - 0.5) * 0.0072, p.y, p.z];
+    });
+    const indices = mesh.index.array, insulation = [], copper = [];
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < columns; col++) {
+        const offset = (row * columns + col) * 6;
+        const batch = col % 4 === 2 ? copper : insulation;
+        for (let n = 0; n < 6; n++) batch.push(indices[offset + n]);
+      }
+    }
+    mesh.setIndex(insulation.concat(copper));
+    mesh.addGroup(0, insulation.length, 0);
+    mesh.addGroup(insulation.length, copper.length, 1);
+    return mesh;
+  });
+  const ribbon = parts.mesh(camera, 'camera-flex', geometry, 'flex');
+  parts.materials.flex.side = parts.materials.traces.side = THREE.DoubleSide;
+  ribbon.material = [parts.materials.flex, parts.materials.traces];
+  parts.plate(camera, 'flex-socket', 'black', 0.014, 0.006, 0.006, 0.0018, 0.009, 0.017, -0.031);
+}
+
+function buildReferenceGimbalHead(parts, yaw) {
+  const frame = group(yaw, 'camera-carrier', 0, -0.047, 0);
+  parts.plate(yaw, 'yaw-backplate', 'black', 0.040, 0.008, 0.067, 0.007, 0, -0.003, -0.025);
+  parts.plate(frame, 'rear-carrier-spine', 'rim', 0.018, 0.089, 0.006, 0.0024, 0, -0.001, -0.054);
+  parts.mesh(frame, 'formed-aluminium-yoke', parts.geometry('formed camera yoke', yokeGeometry), 'brushed');
+  for (const side of [-1, 1]) {
+    const pin = group(frame, 'pitch-bearing', side * 0.039, 0, 0);
+    pin.rotation.z = -side * Math.PI / 2;
+    parts.turned(pin, 'reference-trunnion', 'brushed', [
+      [0, -0.005], [0.0108, -0.005], [0.0137, -0.0025], [0.0143, 0.0002],
+      [0.0143, 0.0050], [0.0131, 0.0066], [0.010, 0.0071], [0.0096, 0.0066], [0, 0.0066],
+    ]);
+    parts.turned(pin, 'pivot-washer', 'steel', [
+      [0, 0.0063], [0.008, 0.0063], [0.0084, 0.0071], [0.008, 0.0082], [0.0045, 0.0082], [0, 0.0077],
+    ]);
+    parts.screws(pin, 'bearing-fastener', [[0, 0.0074, 0]], 0.0048);
+  }
+  const pitch = group(yaw, 'gimbal-pitch', 0, -0.047, 0);
+  const camera = group(pitch, 'camera');
+  const lower = parts.plate(camera, 'camera-body', 'cameraCast', 0.069, 0.045, 0.063, 0.009, 0, -0.007, -0.001);
+  const upper = parts.plate(camera, 'camera-top', 'cameraCast', 0.069, 0.015, 0.063, 0.009, 0, 0.022, -0.001);
+  finishUV(lower.geometry);
+  finishUV(upper.geometry);
+  parts.plate(camera, 'camera-parting-line', 'rubber', 0.068, 0.0025, 0.062, 0.0088, 0, 0.015, -0.001);
+  parts.screws(camera, 'camera-cover-fasteners', [-0.024, 0.024].flatMap(x =>
+    [-0.019, 0.017].map(z => [x, 0.0294, z])), 0.0022).material = parts.materials.toolBlack;
+  cameraRibbon(parts, camera);
+  const lens = group(camera, 'lens', 0, 0, 0.022);
+  lens.rotation.x = Math.PI / 2;
+  parts.turned(lens, 'reference-lens-mount', 'lensMetal', [
+    [0, 0], [0.0326, 0], [0.033, 0.004], [0.033, 0.008], [0.0308, 0.0095],
+    [0.0305, 0.0118], [0.0294, 0.013], [0.0294, 0.034], [0.0307, 0.0348],
+    [0.031, 0.0367], [0.0302, 0.0383], [0.0276, 0.0385], [0.0264, 0.0375],
+    [0.0248, 0.0320], [0.0236, 0.0265], [0.021, 0.019], [0.0124, 0.013], [0, 0.012],
+  ]);
+  parts.mesh(lens, 'fluted-focus-ring', parts.geometry('fluted focus ring', focusRing), 'lensMetal');
+  parts.turned(lens, 'retaining-ring', 'black', [
+    [0.0244, 0.030], [0.0267, 0.0320], [0.0272, 0.0347],
+    [0.0268, 0.0354], [0.0257, 0.0354], [0.0246, 0.0333], [0.0244, 0.030],
+  ]);
+  const outer = parts.mesh(lens, 'coated-objective', parts.geometry('front coated element',
+    () => objectiveGeometry(0.0255, 0, 0.0268, 0.0051, 0)), 'frontCoating');
+  outer.castShadow = false;
+  parts.turned(lens, 'internal-lens-spacer', 'iris', [
+    [0.0200, 0.0165], [0.0200, 0.0215], [0.0188, 0.0225],
+    [0.0173, 0.0225], [0.0167, 0.0215], [0.0162, 0.0190],
+  ]);
+  parts.mesh(lens, 'inner-objective', parts.geometry('inner coated element',
+    () => objectiveGeometry(0.0184, 0.0032, 0.0190, 0.0068, 1.4)), 'coatedLens');
+  parts.rod(lens, 'diaphragm', 'iris', 0.0051, [0, 0.0168, 0], [0, 0.0180, 0]);
+  const dome = parts.mesh(lens, 'front-element',
+    parts.geometry('reference optical dome', () => new THREE.SphereGeometry(1, 64, 20, 0, TAU, 0, Math.PI / 2)),
+    'glass', 0, 0.0327, 0);
+  dome.scale.set(0.0253, 0.0032, 0.0253);
+  dome.castShadow = false;
+  parts.materials.glass.iridescence = 0.7;
+  parts.materials.glass.opacity = 0.17;
+}
+
 /**
  * 创建独立的纯代码六旋翼模型，返回 THREE.Group。仅依赖 three。
  * 单位为米，+Y 向上，+Z 朝机头，原点在两条滑橇之间的地面上。
@@ -611,12 +1084,19 @@ function buildGimbal(parts, root) {
  * rotor-1 到 rotor-6 绕各自的本地 Y 轴旋转，spinSign 在节点的 userData 中。
  * animations 中的 rotor-spin 是一秒一圈的循环片段，可用 THREE.AnimationMixer 播放。
  * gimbal 控制整套云台的显隐，gimbal-pitch 绕 X 轴正转时镜头下俯。
+ * version 默认为 1。传入 { version: 2 } 使用多视角部件参考图重建的外观。
  */
-export function createHexacopter() {
+export function createHexacopter({ version = 1 } = {}) {
+  if (version !== 1 && version !== 2) throw new RangeError('Hexacopter version must be 1 or 2');
   const model = new THREE.Group();
   model.name = 'hexacopter';
   const parts = new Parts();
-  buildFuselage(parts, model);
+  if (version === 2) {
+    addReferenceFinishes(parts);
+    buildReferenceBody(parts, model);
+  } else {
+    buildFuselage(parts, model);
+  }
   const spinTracks = [];
   for (let number = 1; number <= 6; number++) {
     buildArm(parts, model, number);
@@ -628,7 +1108,7 @@ export function createHexacopter() {
   }
   model.animations.push(new THREE.AnimationClip('rotor-spin', 1, spinTracks));
   buildLandingGear(parts, model);
-  buildGimbal(parts, model);
+  buildGimbal(parts, model, version === 2);
   ownedParts.set(model, parts);
   return model;
 }
